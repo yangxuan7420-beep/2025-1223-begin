@@ -10,12 +10,18 @@ from logic.metrics import METRIC_CATALOG, compute_financial_indicators, suggest_
 from parser.wind_parser import WindParser
 from view.display import render_charts, render_overview, render_risk_status
 from view.validators import validate_logic_payload
+from views.research_signals import render_research_signals
 
 
 st.set_page_config(page_title="VisionFinance", page_icon=":bar_chart:", layout="wide")
 
 st.title("VisionFinance")
 st.caption("基于 Wind 数据的二次分析展示")
+
+if "current_view" not in st.session_state:
+    st.session_state.current_view = "analysis"
+
+st.session_state.setdefault("logic_output", None)
 
 
 def _save_uploaded_files(uploaded_files: Iterable, temp_dir: str) -> List[Path]:
@@ -92,6 +98,20 @@ def _render_mapping_selector(
 
 
 def main() -> None:
+    if st.button("查看研究提示"):
+        st.session_state.current_view = "research"
+
+    if st.session_state.current_view == "research":
+        if st.button("返回分析页面"):
+            st.session_state.current_view = "analysis"
+
+        logic_output = st.session_state.get("logic_output")
+        if logic_output is None:
+            st.info("请先完成财务分析，再查看研究提示。")
+        else:
+            render_research_signals(logic_output)
+        return
+
     st.sidebar.header("文件上传区")
     merge_axis = st.sidebar.radio(
         "合并方式",
@@ -118,6 +138,8 @@ def main() -> None:
         st.session_state["selected_mapping"] = {}
         st.session_state["mapping_confirmed"] = False
         st.session_state["upload_token"] = upload_token
+        st.session_state["logic_output"] = None
+        st.session_state.current_view = "analysis"
 
     try:
         parsed = _parse_uploaded_files(uploaded_files, merge_axis)
@@ -132,6 +154,7 @@ def main() -> None:
     if selection != st.session_state.get("selected_mapping", {}):
         st.session_state["selected_mapping"] = selection
         st.session_state["mapping_confirmed"] = False
+        st.session_state["logic_output"] = None
 
     if st.button("确认口径并分析"):
         st.session_state["mapping_confirmed"] = True
@@ -147,6 +170,8 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
         st.stop()
+
+    st.session_state["logic_output"] = indicators
 
     base_metrics = indicators["基础指标"]
     derived_metrics = indicators["派生指标"]
