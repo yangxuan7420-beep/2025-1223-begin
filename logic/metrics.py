@@ -186,16 +186,32 @@ def _compute_free_cash_flow(
 def _compute_dsri(
     receivable_series: pd.Series, revenue_series: pd.Series
 ) -> tuple[float, bool, bool]:
-    receivable = _safe_first(receivable_series)
-    revenue = _safe_first(revenue_series)
-    denominator_zero = False
-    if pd.isna(receivable) or pd.isna(revenue) or receivable == 0:
-        return np.nan, True, denominator_zero
-    if revenue == 0:
-        denominator_zero = True
-        return np.nan, True, denominator_zero
-    ratio = receivable / revenue
-    return ratio, _negative_or_invalid(ratio), denominator_zero
+    paired = pd.DataFrame({"receivable": receivable_series, "revenue": revenue_series})
+    ordered_index = _order_index_by_time(paired.index)
+    paired = paired.reindex(ordered_index)
+
+    selected = paired.iloc[:2]
+    revenue_zero = (selected["revenue"] == 0).any()
+
+    if selected.shape[0] < 2:
+        return np.nan, True, revenue_zero
+
+    if (
+        selected["receivable"].isna().any()
+        or selected["revenue"].isna().any()
+        or revenue_zero
+    ):
+        return np.nan, True, revenue_zero
+
+    ratios = selected["receivable"] / selected["revenue"]
+    ratio_t = ratios.iloc[0]
+    ratio_previous = ratios.iloc[1]
+
+    if ratio_previous == 0:
+        return np.nan, True, True
+
+    dsri = ratio_t / ratio_previous
+    return dsri, _negative_or_invalid(dsri), False
 
 
 def compute_financial_indicators(parsed_data: Any) -> Dict[str, Any]:
