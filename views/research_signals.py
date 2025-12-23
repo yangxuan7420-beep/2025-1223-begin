@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
@@ -201,6 +204,102 @@ def _operating_stability_signal(logic_output: Mapping[str, Any]) -> Signal:
     )
 
 
+_DEFAULT_INTERPRETATIONS: dict[str, Any] = {
+    "profit_quality": {
+        "generic": {
+            "interpretation": "当利润与经营现金流节奏出现分化时，可能意味着利润兑现质量需要进一步核查。",
+            "risk_implication": "建议对比利润与现金流来源结构，核查应收、预付、一次性项目对利润的影响。",
+        },
+        "industry": {
+            "快消/啤酒": {
+                "interpretation": "快消行业常见先款后货与预收款特征，现金流表现通常领先于利润。需区分经营改善与一次性扰动。",
+                "risk_implication": "可重点核查合同负债、渠道回款与费用投放节奏，判断利润改善是否可持续。",
+            }
+        },
+    },
+    "financial_structure": {
+        "generic": {
+            "interpretation": "有息负债的节奏若出现显著变化，可能意味着融资结构或资金用途发生调整，需要关注资本结构质量。",
+            "risk_implication": "建议梳理新增或减少的有息负债来源与用途，核查融资成本与偿债安排对未来现金流的影响。",
+        },
+        "industry": {
+            "快消/啤酒": {
+                "interpretation": "快消企业多采用渠道预收与经营性现金流覆盖营运资金，债务上升往往对应扩产或渠道投放节奏变化。",
+                "risk_implication": "可结合渠道库存与产能扩张计划，核查债务用途与销售投放节奏是否匹配，关注再融资需求。",
+            }
+        },
+    },
+    "operating_stability": {
+        "generic": {
+            "interpretation": "收入、利润与经营现金流的走势若出现分化，可能存在经营结构变化或一次性因素扰动，需要进一步拆解。",
+            "risk_implication": "建议拆分业务条线与成本费用，对比现金流与利润节奏，核查是否存在渠道变动、订单节奏或费用扰动。",
+        },
+        "industry": {
+            "快消/啤酒": {
+                "interpretation": "快消行业旺季与费用投放节奏明显，收入与现金流可能阶段性错位，需要结合渠道库存与促销节奏解读。",
+                "risk_implication": "可核查渠道库存、终端动销与费用投放节奏，判断波动是否来源于季节性或渠道结构调整。",
+            }
+        },
+    },
+}
+
+
+_INDUSTRY_OPTIONS = ["通用（不选行业）", "快消/啤酒", "制造/周期", "光伏/新能源", "其他"]
+
+
+@lru_cache(maxsize=1)
+def _load_industry_interpretations() -> dict[str, Any]:
+    resource_path = Path(__file__).resolve().parent.parent / "resources" / "industry_interpretations.json"
+    if resource_path.exists():
+        try:
+            with resource_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return _DEFAULT_INTERPRETATIONS
+
+
+def _should_apply_industry(industry: str | None) -> bool:
+    return industry not in (None, "通用（不选行业）", "其他")
+
+
+def _resolve_interpretations(signal_id: str, selected_industry: str) -> tuple[str, str | None, str, str | None]:
+    templates = _load_industry_interpretations() or _DEFAULT_INTERPRETATIONS
+    signal_templates = templates.get(signal_id, {}) if isinstance(templates, Mapping) else {}
+
+    generic_template = signal_templates.get("generic", {}) if isinstance(signal_templates, Mapping) else {}
+    fallback_generic = _DEFAULT_INTERPRETATIONS.get(signal_id, {}).get("generic", {})
+
+    generic_interpretation = (
+        generic_template.get("interpretation")
+        if isinstance(generic_template, Mapping)
+        else None
+    )
+    if not generic_interpretation:
+        generic_interpretation = fallback_generic.get("interpretation") or "通用解释暂未配置，请结合核心指标核查。"
+
+    generic_risk = (
+        generic_template.get("risk_implication")
+        if isinstance(generic_template, Mapping)
+        else None
+    )
+    if not generic_risk:
+        generic_risk = fallback_generic.get("risk_implication") or "建议关注关键假设与数据来源，进一步核查相关披露。"
+
+    industry_interpretation = None
+    industry_risk = None
+    if _should_apply_industry(selected_industry) and isinstance(signal_templates, Mapping):
+        industry_templates = signal_templates.get("industry", {}) if isinstance(signal_templates.get("industry"), Mapping) else {}
+        industry_match = industry_templates.get(selected_industry) if isinstance(industry_templates, Mapping) else None
+        if isinstance(industry_match, Mapping):
+            industry_interpretation = industry_match.get("interpretation") or None
+            industry_risk = industry_match.get("risk_implication") or None
+
+    return generic_interpretation, industry_interpretation, generic_risk, industry_risk
+
+
 def generate_research_signals(logic_output: Mapping[str, Any]) -> list[Signal]:
     signals = [
         _profit_quality_signal(logic_output),
@@ -258,6 +357,18 @@ def _render_evidence_block(logic_output: Mapping[str, Any], evidence: Sequence[M
 
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
     st.header("研究提示（Research Signals）")
+
+    if "selected_industry" not in st.session_state or st.session_state.selected_industry not in _INDUSTRY_OPTIONS:
+        st.session_state.selected_industry = _INDUSTRY_OPTIONS[0]
+
+    st.session_state.selected_industry = st.selectbox(
+        "行业（可选）：",
+        _INDUSTRY_OPTIONS,
+        index=_INDUSTRY_OPTIONS.index(st.session_state.selected_industry),
+        key="selected_industry",
+    )
+    selected_industry = st.session_state.selected_industry
+
     signals = generate_research_signals(logic_output)
 
     for signal in signals:
@@ -272,3 +383,20 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
             with st.expander("研报可用表述", expanded=False):
                 for text in signal.get("copy_text", []):
                     st.markdown(f"- {text}")
+
+            generic_interp, industry_interp, generic_risk, industry_risk = _resolve_interpretations(
+                signal["id"], selected_industry
+            )
+
+            with st.expander("行业解释（可选增强）", expanded=False):
+                st.markdown(f"**通用解释：** {generic_interp}")
+                if industry_interp:
+                    st.markdown(f"**{selected_industry} 增强：** {industry_interp}")
+                elif _should_apply_industry(selected_industry):
+                    st.info("暂无该行业的增强解释，已展示通用解释。")
+                else:
+                    st.caption("当前未选择行业增强，已展示通用解释。")
+
+            risk_text = industry_risk if industry_risk and _should_apply_industry(selected_industry) else generic_risk
+            with st.expander("风险含义（研究提示）", expanded=False):
+                st.markdown(risk_text)
