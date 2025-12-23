@@ -37,12 +37,32 @@ def _series_from_mapping(data: Mapping[str, Any], key: str) -> pd.Series:
 
 
 def _series_from_dataframe(frame: pd.DataFrame, key: str) -> pd.Series:
+    # 1. 精确 index 命中（保留原逻辑）
     if key in frame.index:
         selection = frame.loc[key]
-    elif key in frame.columns:
-        selection = frame[key]
+
+    # 2. 模糊 index 命中（新增）
+    elif isinstance(frame.index, pd.Index):
+        mask = frame.index.astype(str).str.contains(key, regex=False, na=False)
+        if mask.any():
+            selection = frame.loc[mask]
+
+        # 3. column 命中（保留）
+        elif key in frame.columns:
+            selection = frame[key]
+        else:
+            return pd.Series([np.nan])
     else:
         return pd.Series([np.nan])
+
+    # 展平逻辑（保持你原有设计）
+    if isinstance(selection, pd.DataFrame):
+        flattened = selection.stack(dropna=False)
+        return flattened if isinstance(flattened, pd.Series) else pd.Series([np.nan])
+    if isinstance(selection, pd.Series):
+        return selection
+    return pd.Series(selection)
+
 
     if isinstance(selection, pd.DataFrame):
         flattened = selection.stack(dropna=False)
