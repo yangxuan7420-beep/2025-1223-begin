@@ -8,7 +8,7 @@ import streamlit as st
 
 from logic.metrics import METRIC_CATALOG, compute_financial_indicators, suggest_candidates
 from parser.wind_parser import WindParser
-from view.display import render_charts, render_mapping_info, render_overview, render_risk_status
+from view.display import render_charts, render_overview, render_risk_status
 from view.validators import validate_logic_payload
 
 
@@ -151,12 +151,9 @@ def main() -> None:
     base_metrics = indicators["基础指标"]
     derived_metrics = indicators["派生指标"]
     risk_matrix = indicators["风险矩阵"]
-    mapping_info = indicators.get("口径信息", {})
-
     render_overview(base_metrics, derived_metrics)
     render_charts(derived_metrics.get("同比趋势", {}))
     render_risk_status(risk_matrix)
-    render_mapping_info(mapping_info)
 
 
 if __name__ == "__main__":
