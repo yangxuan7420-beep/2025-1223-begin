@@ -21,6 +21,24 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
 
 
+def _order_series_by_time(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+
+    index = series.index
+    datetime_index = pd.to_datetime(index, errors="coerce")
+    if not pd.isna(datetime_index).all():
+        order = np.argsort(datetime_index)[::-1]
+        return series.iloc[order]
+
+    numeric_index = pd.to_numeric(index, errors="coerce")
+    if not pd.isna(numeric_index).all():
+        order = np.argsort(numeric_index)[::-1]
+        return series.iloc[order]
+
+    return series
+
+
 def _series_from_mapping(data: Mapping[str, Any], key: str) -> pd.Series:
     value = data.get(key, np.nan)
     if isinstance(value, pd.Series):
@@ -95,14 +113,22 @@ def _extract_series(parsed_data: Any, key: str) -> pd.Series:
 def _safe_first(series: pd.Series) -> Any:
     if series.empty:
         return np.nan
-    return series.iloc[0]
+    ordered = _order_series_by_time(series)
+    non_na = ordered.dropna()
+    if non_na.empty:
+        return np.nan
+    return non_na.iloc[0]
 
 
 def _compute_yoy(series: pd.Series) -> float:
     if series.size < 2:
         return np.nan
-    current = series.iloc[0]
-    previous = series.iloc[1]
+    ordered = _order_series_by_time(series)
+    non_na = ordered.dropna()
+    if non_na.size < 2:
+        return np.nan
+    current = non_na.iloc[0]
+    previous = non_na.iloc[1]
     if pd.isna(previous) or previous == 0:
         return np.nan
     if pd.isna(current):
