@@ -52,21 +52,40 @@ def render_charts(yoy_trends: Mapping[str, Any]) -> None:
             st.line_chart(profit_series)
 
 
-def render_risk_status(flags: Mapping[str, Any]) -> None:
+def render_risk_status(risk_matrix: Mapping[str, Any]) -> None:
     st.header("风险状态展示")
-    yoy_flags = flags.get("同比异常", {})
-    derived_flags = flags.get("派生异常", {})
-
-    flag_df = (
-        pd.DataFrame({"同比异常": yoy_flags, "派生异常": derived_flags})
-        if yoy_flags or derived_flags
-        else pd.DataFrame()
-    )
-
-    if flag_df.empty:
-        st.error("缺少风险标记，无法展示。")
+    if not risk_matrix:
+        st.error("缺少风险矩阵，无法展示。")
         st.stop()
 
+    def _status_icon(value: Any) -> str:
+        if value is True:
+            return "✅"
+        if value is False:
+            return "⬜"
+        return "—"
+
+    rows: list[dict[str, Any]] = []
+    for metric_key, payload in risk_matrix.items():
+        display_name = payload.get("display_name", metric_key)
+        yoy_info = payload.get("yoy_anomaly", {})
+        derived_info = payload.get("derived_anomaly", {})
+        rows.append(
+            {
+                "指标": display_name,
+                "同比异常": _status_icon(yoy_info.get("value")),
+                "派生异常": _status_icon(derived_info.get("value")),
+                "同比说明": "；".join(yoy_info.get("reasons", [])),
+                "派生说明": "；".join(derived_info.get("reasons", [])),
+            }
+        )
+
+    if not rows:
+        st.error("缺少风险矩阵，无法展示。")
+        st.stop()
+
+    flag_df = pd.DataFrame(rows).set_index("指标")
+    st.caption("✅ 触发异常；⬜ 未触发；— 无法评估/不适用。")
     st.dataframe(flag_df)
 
 

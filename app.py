@@ -150,12 +150,12 @@ def main() -> None:
 
     base_metrics = indicators["基础指标"]
     derived_metrics = indicators["派生指标"]
-    flags = indicators["异常标记"]
+    risk_matrix = indicators["风险矩阵"]
     mapping_info = indicators.get("口径信息", {})
 
     render_overview(base_metrics, derived_metrics)
     render_charts(derived_metrics.get("同比趋势", {}))
-    render_risk_status(flags)
+    render_risk_status(risk_matrix)
     render_mapping_info(mapping_info)
 
 
