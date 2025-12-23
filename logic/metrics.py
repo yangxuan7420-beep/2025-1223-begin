@@ -73,11 +73,23 @@ def _series_from_dataframe(frame: pd.DataFrame, key: str) -> pd.Series:
 
 
 def _extract_series(parsed_data: Any, key: str) -> pd.Series:
+    # 1. 单 DataFrame（保留）
     if isinstance(parsed_data, pd.DataFrame):
         return _series_from_dataframe(parsed_data, key)
+
+    # 2. 多表 dict：逐表尝试（核心修复）
     if isinstance(parsed_data, Mapping):
-        return _series_from_mapping(parsed_data, key)
+        for value in parsed_data.values():
+            if isinstance(value, pd.DataFrame):
+                series = _series_from_dataframe(value, key)
+                # 只要不是全 NaN，就认为命中
+                if not series.isna().all():
+                    return series
+        # 所有表都没命中
+        return pd.Series([np.nan])
+
     return pd.Series([np.nan])
+
 
 
 def _safe_first(series: pd.Series) -> Any:
