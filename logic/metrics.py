@@ -16,6 +16,12 @@ BASE_METRIC_KEYS: tuple[str, ...] = (
 
 DERIVED_REQUIRED_KEYS: tuple[str, ...] = ("资本性支出", "应收账款")
 
+METRIC_ALIASES: Dict[str, tuple[str, ...]] = {
+    "营业收入": ("营业收入", "营业总收入", "主营业务收入"),
+    "资本性支出": ("资本性支出", "购建固定资产、无形资产和其他长期资产支付的现金"),
+    "应收账款": ("应收账款", "应收账款净额", "应收账款及票据"),
+}
+
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
@@ -110,6 +116,14 @@ def _extract_series(parsed_data: Any, key: str) -> pd.Series:
     return pd.Series([np.nan])
 
 
+def _extract_series_with_aliases(parsed_data: Any, key: str) -> pd.Series:
+    candidates = METRIC_ALIASES.get(key, (key,))
+    for candidate in candidates:
+        series = _extract_series(parsed_data, candidate)
+        if not series.isna().all():
+            return series
+    return _extract_series(parsed_data, key)
+
 
 def _safe_first(series: pd.Series) -> Any:
     if series.empty:
@@ -175,7 +189,7 @@ def _compute_dsri(
     receivable = _safe_first(receivable_series)
     revenue = _safe_first(revenue_series)
     denominator_zero = False
-    if pd.isna(receivable) or pd.isna(revenue):
+    if pd.isna(receivable) or pd.isna(revenue) or receivable == 0:
         return np.nan, True, denominator_zero
     if revenue == 0:
         denominator_zero = True
@@ -186,10 +200,10 @@ def _compute_dsri(
 
 def compute_financial_indicators(parsed_data: Any) -> Dict[str, Any]:
     base_series: Dict[str, pd.Series] = {
-        key: _extract_series(parsed_data, key) for key in BASE_METRIC_KEYS
+        key: _extract_series_with_aliases(parsed_data, key) for key in BASE_METRIC_KEYS
     }
     supplemental_series: Dict[str, pd.Series] = {
-        key: _extract_series(parsed_data, key) for key in DERIVED_REQUIRED_KEYS
+        key: _extract_series_with_aliases(parsed_data, key) for key in DERIVED_REQUIRED_KEYS
     }
 
     base_metrics: Dict[str, Any] = {k: _safe_first(v) for k, v in base_series.items()}
