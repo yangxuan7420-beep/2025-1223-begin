@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -65,6 +66,71 @@ def render_risk_status(risk_matrix: Mapping[str, Any]) -> None:
             return "⬜"
         return "—"
 
+    def _status_label(value: Any) -> str:
+        if value is True:
+            return "触发异常"
+        if value is False:
+            return "未触发"
+        return "不适用"
+
+    def _with_sign(percent: str) -> str:
+        if percent.startswith("-"):
+            return percent
+        return f"+{percent}"
+
+    def _humanize_reason(reason: str, context: str) -> str:
+        trimmed = reason.strip()
+
+        if trimmed.startswith("missing_metric:"):
+            detail = trimmed.split(":", 1)[1].strip()
+            return f"相关财务科目在报表中缺失，无法评估（{detail}）"
+
+        if trimmed == "not_applicable":
+            return "当前未定义适用于该指标的风险规则"
+        if trimmed == "missing_metric":
+            return "相关财务科目在报表中缺失，无法评估"
+        if trimmed == "insufficient_periods":
+            return "可用年份不足，无法进行同比判断"
+        if trimmed == "cannot_compute":
+            return "指标计算条件不满足"
+        if trimmed == "division_by_zero":
+            return "同比基期为 0，无法计算变化率"
+
+        yoy_match = re.match(r"(.+?) YoY=([+-]?\d+)% > ([+-]?\d+)%", trimmed)
+        if yoy_match:
+            label, yoy_percent, threshold = yoy_match.groups()
+            friendly_percent = _with_sign(yoy_percent if yoy_percent.endswith("%") else f"{yoy_percent}%")
+            threshold_display = threshold if threshold.endswith("%") else f"{threshold}%"
+            return f"同比序列中检测到异常：{label} 年同比 {friendly_percent}（阈值 {threshold_display}）"
+
+        if trimmed.startswith("FCF="):
+            return f"自由现金流为 {trimmed.split('=', 1)[1]}，低于正常经营区间"
+
+        dsri_match = re.match(r"DSRI=([\d\.]+) > ([\d\.]+)", trimmed)
+        if dsri_match:
+            value, threshold = dsri_match.groups()
+            return f"派生指标异常：DSRI={value}，高于阈值 {threshold}"
+
+        if context == "yoy":
+            return f"同比分析提示：{trimmed}"
+        return trimmed
+
+    def _explanations(info: Mapping[str, Any], context: str) -> list[str]:
+        value = info.get("value")
+        reasons = info.get("reasons") or []
+
+        if value is None:
+            mapped = [_humanize_reason(reason, context) for reason in reasons or ["cannot_compute"]]
+            return list(dict.fromkeys(mapped))
+
+        if value is False:
+            if not reasons:
+                return ["未检测到异常的同比变化" if context == "yoy" else "派生指标结果处于正常范围内"]
+            return [_humanize_reason(reason, context) for reason in reasons]
+
+        humanized = [_humanize_reason(reason, context) for reason in reasons]
+        return humanized or ["触发异常，请查看相关数据"]
+
     rows: list[dict[str, Any]] = []
     for metric_key, payload in risk_matrix.items():
         display_name = payload.get("display_name", metric_key)
@@ -73,10 +139,10 @@ def render_risk_status(risk_matrix: Mapping[str, Any]) -> None:
         rows.append(
             {
                 "指标": display_name,
-                "同比异常": _status_icon(yoy_info.get("value")),
-                "派生异常": _status_icon(derived_info.get("value")),
-                "同比说明": "；".join(yoy_info.get("reasons", [])),
-                "派生说明": "；".join(derived_info.get("reasons", [])),
+                "同比异常": f"{_status_icon(yoy_info.get('value'))} {_status_label(yoy_info.get('value'))}",
+                "派生异常": f"{_status_icon(derived_info.get('value'))} {_status_label(derived_info.get('value'))}",
+                "同比说明": "；".join(_explanations(yoy_info, "yoy")),
+                "派生说明": "；".join(_explanations(derived_info, "derived")),
             }
         )
 
