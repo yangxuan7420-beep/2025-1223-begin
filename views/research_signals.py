@@ -247,57 +247,83 @@ _DEFAULT_INTERPRETATIONS: dict[str, Any] = {
 _INDUSTRY_OPTIONS = ["通用（不选行业）", "快消/啤酒", "制造/周期", "光伏/新能源", "其他"]
 
 
+_FALLBACK_WARNING = "行业解释资源缺失或格式不正确，已降级为通用提示。"
+
+_MINIMAL_GENERIC_FALLBACK = {
+    "interpretation": "通用解释暂未配置，请结合核心指标核查。",
+    "risk_implication": "建议关注关键假设与数据来源，进一步核查相关披露。",
+}
+
+
 @lru_cache(maxsize=1)
-def _load_industry_interpretations() -> dict[str, Any]:
+def _load_industry_interpretations() -> tuple[dict[str, Any], bool]:
     resource_path = Path(__file__).resolve().parent.parent / "resources" / "industry_interpretations.json"
     if resource_path.exists():
         try:
             with resource_path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
+                return data, False
         except Exception:
             pass
-    return _DEFAULT_INTERPRETATIONS
+    return _DEFAULT_INTERPRETATIONS, True
 
 
 def _should_apply_industry(industry: str | None) -> bool:
     return industry not in (None, "通用（不选行业）", "其他")
 
 
-def _resolve_interpretations(signal_id: str, selected_industry: str) -> tuple[str, str | None, str, str | None]:
-    templates = _load_industry_interpretations() or _DEFAULT_INTERPRETATIONS
+def _resolve_interpretations(
+    signal_id: str, selected_industry: str
+) -> tuple[str, str | None, str, str | None, bool]:
+    templates, load_failed = _load_industry_interpretations()
+    resource_issue = load_failed or not isinstance(templates, Mapping)
+
+    if not isinstance(templates, Mapping):
+        templates = _DEFAULT_INTERPRETATIONS
+
     signal_templates = templates.get(signal_id, {}) if isinstance(templates, Mapping) else {}
+    if not isinstance(signal_templates, Mapping):
+        resource_issue = True
+        signal_templates = _DEFAULT_INTERPRETATIONS.get(signal_id, {})
 
-    generic_template = signal_templates.get("generic", {}) if isinstance(signal_templates, Mapping) else {}
     fallback_generic = _DEFAULT_INTERPRETATIONS.get(signal_id, {}).get("generic", {})
+    generic_template = signal_templates.get("generic", {}) if isinstance(signal_templates, Mapping) else {}
+    if not isinstance(generic_template, Mapping):
+        resource_issue = True
+        generic_template = {}
 
-    generic_interpretation = (
-        generic_template.get("interpretation")
-        if isinstance(generic_template, Mapping)
-        else None
-    )
+    generic_interpretation = generic_template.get("interpretation") if generic_template else None
     if not generic_interpretation:
-        generic_interpretation = fallback_generic.get("interpretation") or "通用解释暂未配置，请结合核心指标核查。"
+        resource_issue = True if not fallback_generic else resource_issue
+        generic_interpretation = (
+            fallback_generic.get("interpretation")
+            if isinstance(fallback_generic, Mapping)
+            else None
+        ) or _MINIMAL_GENERIC_FALLBACK["interpretation"]
 
-    generic_risk = (
-        generic_template.get("risk_implication")
-        if isinstance(generic_template, Mapping)
-        else None
-    )
+    generic_risk = generic_template.get("risk_implication") if generic_template else None
     if not generic_risk:
-        generic_risk = fallback_generic.get("risk_implication") or "建议关注关键假设与数据来源，进一步核查相关披露。"
+        resource_issue = True if not fallback_generic else resource_issue
+        generic_risk = (
+            fallback_generic.get("risk_implication")
+            if isinstance(fallback_generic, Mapping)
+            else None
+        ) or _MINIMAL_GENERIC_FALLBACK["risk_implication"]
 
     industry_interpretation = None
     industry_risk = None
     if _should_apply_industry(selected_industry) and isinstance(signal_templates, Mapping):
-        industry_templates = signal_templates.get("industry", {}) if isinstance(signal_templates.get("industry"), Mapping) else {}
+        industry_templates = signal_templates.get("industry") if isinstance(signal_templates, Mapping) else {}
+        if not isinstance(industry_templates, Mapping):
+            resource_issue = True
+            industry_templates = {}
         industry_match = industry_templates.get(selected_industry) if isinstance(industry_templates, Mapping) else None
         if isinstance(industry_match, Mapping):
             industry_interpretation = industry_match.get("interpretation") or None
             industry_risk = industry_match.get("risk_implication") or None
 
-    return generic_interpretation, industry_interpretation, generic_risk, industry_risk
+    return generic_interpretation, industry_interpretation, generic_risk, industry_risk, resource_issue
 
 
 def generate_research_signals(logic_output: Mapping[str, Any]) -> list[Signal]:
@@ -358,16 +384,19 @@ def _render_evidence_block(logic_output: Mapping[str, Any], evidence: Sequence[M
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
     st.header("研究提示（Research Signals）")
 
-    if "selected_industry" not in st.session_state or st.session_state.selected_industry not in _INDUSTRY_OPTIONS:
-        st.session_state.selected_industry = _INDUSTRY_OPTIONS[0]
+    current_selection = st.session_state.get("selected_industry")
+    if current_selection not in _INDUSTRY_OPTIONS:
+        current_selection = _INDUSTRY_OPTIONS[0]
+        st.session_state["selected_industry"] = current_selection
 
-    st.session_state.selected_industry = st.selectbox(
-        "行业（可选）：",
-        _INDUSTRY_OPTIONS,
-        index=_INDUSTRY_OPTIONS.index(st.session_state.selected_industry),
-        key="selected_industry",
-    )
-    selected_industry = st.session_state.selected_industry
+    selector_col, _ = st.columns([2, 3])
+    with selector_col:
+        selected_industry = st.selectbox(
+            "行业（可选）：",
+            _INDUSTRY_OPTIONS,
+            index=_INDUSTRY_OPTIONS.index(current_selection),
+            key="selected_industry",
+        )
 
     signals = generate_research_signals(logic_output)
 
@@ -384,11 +413,13 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
                 for text in signal.get("copy_text", []):
                     st.markdown(f"- {text}")
 
-            generic_interp, industry_interp, generic_risk, industry_risk = _resolve_interpretations(
+            generic_interp, industry_interp, generic_risk, industry_risk, resource_issue = _resolve_interpretations(
                 signal["id"], selected_industry
             )
 
             with st.expander("行业解释（可选增强）", expanded=False):
+                if resource_issue:
+                    st.warning(_FALLBACK_WARNING)
                 st.markdown(f"**通用解释：** {generic_interp}")
                 if industry_interp:
                     st.markdown(f"**{selected_industry} 增强：** {industry_interp}")
@@ -397,6 +428,13 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
                 else:
                     st.caption("当前未选择行业增强，已展示通用解释。")
 
-            risk_text = industry_risk if industry_risk and _should_apply_industry(selected_industry) else generic_risk
             with st.expander("风险含义（研究提示）", expanded=False):
-                st.markdown(risk_text)
+                if resource_issue:
+                    st.warning(_FALLBACK_WARNING)
+                st.markdown(f"**通用提示：** {generic_risk}")
+                if industry_risk and _should_apply_industry(selected_industry):
+                    st.markdown(f"**{selected_industry} 增强提示：** {industry_risk}")
+                elif _should_apply_industry(selected_industry):
+                    st.info("暂无该行业的增强解释，已展示通用解释。")
+                else:
+                    st.caption("当前未选择行业增强，已展示通用提示。")
