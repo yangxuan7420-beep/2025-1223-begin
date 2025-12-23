@@ -21,22 +21,29 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
 
 
-def _order_series_by_time(series: pd.Series) -> pd.Series:
-    if series.empty:
-        return series
+def _order_index_by_time(index: pd.Index) -> pd.Index:
+    if index.empty:
+        return index
 
-    index = series.index
     datetime_index = pd.to_datetime(index, errors="coerce")
     if not pd.isna(datetime_index).all():
         order = np.argsort(datetime_index)[::-1]
-        return series.iloc[order]
+        return index.take(order)
 
     numeric_index = pd.to_numeric(index, errors="coerce")
     if not pd.isna(numeric_index).all():
         order = np.argsort(numeric_index)[::-1]
-        return series.iloc[order]
+        return index.take(order)
 
-    return series
+    return index
+
+
+def _order_series_by_time(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return series
+
+    ordered_index = _order_index_by_time(series.index)
+    return series.reindex(ordered_index)
 
 
 def _series_from_mapping(data: Mapping[str, Any], key: str) -> pd.Series:
@@ -75,18 +82,12 @@ def _series_from_dataframe(frame: pd.DataFrame, key: str) -> pd.Series:
 
     # 展平逻辑（保持你原有设计）
     if isinstance(selection, pd.DataFrame):
-        flattened = selection.stack(dropna=False)
+        ordered_columns = _order_index_by_time(selection.columns)
+        flattened = selection.loc[:, ordered_columns].T.stack(dropna=False)
         return flattened if isinstance(flattened, pd.Series) else pd.Series([np.nan])
     if isinstance(selection, pd.Series):
-        return selection
-    return pd.Series(selection)
-
-
-    if isinstance(selection, pd.DataFrame):
-        flattened = selection.stack(dropna=False)
-        return flattened if isinstance(flattened, pd.Series) else pd.Series([np.nan])
-    if isinstance(selection, pd.Series):
-        return selection
+        ordered_index = _order_index_by_time(selection.index)
+        return selection.reindex(ordered_index)
     return pd.Series(selection)
 
 
