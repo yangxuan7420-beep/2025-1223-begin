@@ -384,21 +384,19 @@ def _render_evidence_block(logic_output: Mapping[str, Any], evidence: Sequence[M
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
     st.header("研究提示（Research Signals）")
 
-    current_selection = st.session_state.get("selected_industry")
-    if current_selection not in _INDUSTRY_OPTIONS:
-        current_selection = _INDUSTRY_OPTIONS[0]
-        st.session_state.selected_industry = current_selection
+    if "selected_industry" not in st.session_state:
+        st.session_state["selected_industry"] = _INDUSTRY_OPTIONS[0]
 
     selector_col, _ = st.columns([2, 3])
     with selector_col:
-        st.session_state.selected_industry = st.selectbox(
+        st.selectbox(
             "行业（可选）：",
             _INDUSTRY_OPTIONS,
-            index=_INDUSTRY_OPTIONS.index(current_selection),
+            index=_INDUSTRY_OPTIONS.index(st.session_state["selected_industry"]),
             key="selected_industry",
         )
 
-    selected_industry = st.session_state.selected_industry
+    selected_industry = st.session_state["selected_industry"]
 
     signals = generate_research_signals(logic_output)
 
