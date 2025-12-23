@@ -8,6 +8,10 @@ import pandas as pd
 from rapidfuzz import fuzz
 
 
+YOY_ANOMALY_THRESHOLD = 3.0
+DSRI_THRESHOLD = 1.4
+
+
 METRIC_CATALOG: Dict[str, Dict[str, Any]] = {
     "营业收入": {
         "aliases": ("营业收入", "营业总收入", "主营业务收入"),
@@ -314,6 +318,51 @@ def _compute_yoy(series: pd.Series) -> float:
     return _safe_first(_order_series_by_time(yoy_series))
 
 
+def _format_percent(value: float) -> str:
+    return f"{value * 100:.0f}%"
+
+
+def _evaluate_yoy_anomaly(series: pd.Series) -> dict[str, Any]:
+    if series.size < 2:
+        return {"value": None, "reasons": ["insufficient_periods"]}
+
+    ordered = _order_series_by_time(series, ascending=True)
+    years = _parse_year_like_values(ordered.index)
+
+    valid_found = False
+    anomaly_reasons: list[str] = []
+    na_reasons: list[str] = []
+
+    for idx in range(1, len(ordered)):
+        current_value = ordered.iloc[idx]
+        previous_value = ordered.iloc[idx - 1]
+        current_year = years[idx]
+        previous_year = years[idx - 1]
+
+        if not _years_are_consecutive(previous_year, current_year):
+            continue
+
+        if pd.isna(previous_value) or pd.isna(current_value):
+            na_reasons.append("missing_metric")
+            continue
+
+        if previous_value == 0:
+            na_reasons.append("division_by_zero")
+            continue
+
+        yoy = (current_value - previous_value) / abs(previous_value)
+        valid_found = True
+        if abs(float(yoy)) > YOY_ANOMALY_THRESHOLD:
+            label = ordered.index[idx]
+            anomaly_reasons.append(f"{label} YoY={_format_percent(yoy)} > {_format_percent(YOY_ANOMALY_THRESHOLD)}")
+
+    if valid_found:
+        return {"value": bool(anomaly_reasons), "reasons": anomaly_reasons}
+
+    fallback_reasons = na_reasons or ["missing_metric"]
+    return {"value": None, "reasons": list(dict.fromkeys(fallback_reasons))}
+
+
 def _negative_or_invalid(value: Any) -> bool:
     if pd.isna(value):
         return True
@@ -328,12 +377,6 @@ def _yoy_flag(yoy_value: Any) -> bool:
     if not _is_number(yoy_value):
         return True
     return abs(float(yoy_value)) > 5.0
-
-
-def _derived_flag(value: Any, denominator_zero: bool = False) -> bool:
-    if denominator_zero:
-        return True
-    return _negative_or_invalid(value)
 
 
 def _compute_free_cash_flow(
@@ -383,6 +426,42 @@ def _compute_dsri(
 
     dsri = ratio_t / ratio_previous
     return dsri, _negative_or_invalid(dsri), False
+
+
+def _evaluate_fcf_anomaly(
+    fcf_value: Any, fcf_series: pd.Series, intrinsic_reason: str | None
+) -> dict[str, Any]:
+    reasons: list[str] = []
+
+    if intrinsic_reason:
+        reasons.append(f"missing_metric: {intrinsic_reason}")
+
+    if fcf_series.empty or fcf_series.dropna().empty:
+        reasons.append("insufficient_periods")
+
+    if reasons:
+        return {"value": None, "reasons": list(dict.fromkeys(reasons))}
+
+    if pd.isna(fcf_value):
+        return {"value": None, "reasons": ["missing_metric"]}
+
+    if float(fcf_value) < 0:
+        return {"value": True, "reasons": [f"FCF={fcf_value:,.2f} < 0"]}
+
+    return {"value": False, "reasons": []}
+
+
+def _evaluate_dsri_anomaly(dsri_value: Any, denominator_zero: bool) -> dict[str, Any]:
+    if denominator_zero:
+        return {"value": None, "reasons": ["division_by_zero"]}
+
+    if pd.isna(dsri_value):
+        return {"value": None, "reasons": ["missing_metric"]}
+
+    if float(dsri_value) > DSRI_THRESHOLD:
+        return {"value": True, "reasons": [f"DSRI={dsri_value:.2f} > {DSRI_THRESHOLD:.2f}"]}
+
+    return {"value": False, "reasons": []}
 
 
 def suggest_candidates(tables: Mapping[str, pd.DataFrame]) -> Dict[str, list[Dict[str, Any]]]:
@@ -479,13 +558,12 @@ def compute_financial_indicators(
 
     if missing_parts:
         free_cash_flow = np.nan
-        fcf_flag = True
         free_cash_flow_series = pd.Series(dtype=float)
         fcf_reason = "；".join(missing_parts)
     else:
         (
             free_cash_flow,
-            fcf_flag,
+            _,
             free_cash_flow_series,
             intrinsic_reason,
         ) = _compute_free_cash_flow(
@@ -493,26 +571,84 @@ def compute_financial_indicators(
         )
         fcf_reason = intrinsic_reason
 
-    dsri_value, dsri_flag, dsri_zero = _compute_dsri(
-        supplemental_series["应收账款"], base_series["营业收入"]
-    )
-
-    yoy_flags: Dict[str, bool] = {k: _yoy_flag(v) for k, v in yoy_changes.items()}
-
-    derived_flags: Dict[str, bool] = {
-        "自由现金流": _derived_flag(free_cash_flow, fcf_flag),
-        "DSRI": _derived_flag(dsri_value, dsri_zero),
-    }
-    derived_flags["同比变动率"] = any(yoy_flags.values())
+    dsri_value, _, dsri_zero = _compute_dsri(supplemental_series["应收账款"], base_series["营业收入"])
 
     revenue_yoy_series = _compute_yoy_series(base_series["营业收入"])
     profit_yoy_series = _compute_yoy_series(profit_series)
+    cfo_yoy_series = _compute_yoy_series(base_series["经营活动产生的现金流量净额"])
+    cash_yoy_series = _compute_yoy_series(base_series["货币资金"])
+    debt_yoy_series = _compute_yoy_series(base_series["有息负债"])
+
+    def _not_applicable(reason: str) -> dict[str, Any]:
+        return {"value": None, "reasons": [reason]}
+
+    risk_matrix: Dict[str, Dict[str, Any]] = {
+        "revenue": {
+            "display_name": "营业收入",
+            "yoy_anomaly": _evaluate_yoy_anomaly(base_series["营业收入"]),
+            "derived_anomaly": _not_applicable("not_applicable"),
+        },
+        "profit": {
+            "display_name": f"利润（{profit_mode}）",
+            "yoy_anomaly": (
+                _evaluate_yoy_anomaly(profit_series)
+                if profit_mode != "缺失"
+                else {"value": None, "reasons": ["not_in_selected_caliber"]}
+            ),
+            "derived_anomaly": _not_applicable("not_applicable"),
+        },
+        "operating_cf": {
+            "display_name": "经营现金流",
+            "yoy_anomaly": _evaluate_yoy_anomaly(base_series["经营活动产生的现金流量净额"]),
+            "derived_anomaly": _not_applicable("not_applicable"),
+        },
+        "cash": {
+            "display_name": "货币资金",
+            "yoy_anomaly": _evaluate_yoy_anomaly(base_series["货币资金"]),
+            "derived_anomaly": _not_applicable("not_applicable"),
+        },
+        "interest_bearing_debt": {
+            "display_name": "有息负债",
+            "yoy_anomaly": _evaluate_yoy_anomaly(base_series["有息负债"]),
+            "derived_anomaly": _not_applicable("not_applicable"),
+        },
+        "free_cash_flow": {
+            "display_name": "自由现金流",
+            "yoy_anomaly": _not_applicable("not_applicable"),
+            "derived_anomaly": _evaluate_fcf_anomaly(
+                free_cash_flow, free_cash_flow_series, fcf_reason
+            ),
+        },
+        "dsri": {
+            "display_name": "DSRI",
+            "yoy_anomaly": _not_applicable("not_applicable"),
+        "derived_anomaly": _evaluate_dsri_anomaly(dsri_value, dsri_zero),
+        },
+    }
+
+    def _normalize_flag(value: Any) -> bool:
+        return bool(value) if value is not None else False
+
+    yoy_flags: Dict[str, bool] = {
+        item["display_name"]: _normalize_flag(item["yoy_anomaly"].get("value"))
+        for item in risk_matrix.values()
+        if isinstance(item, dict) and "yoy_anomaly" in item
+    }
+
+    derived_flags: Dict[str, bool] = {
+        "自由现金流": _normalize_flag(risk_matrix["free_cash_flow"]["derived_anomaly"].get("value")),
+        "DSRI": _normalize_flag(risk_matrix["dsri"]["derived_anomaly"].get("value")),
+    }
+    derived_flags["同比变动率"] = any(_normalize_flag(item["yoy_anomaly"].get("value")) for item in risk_matrix.values())
 
     derived_metrics: Dict[str, Any] = {
         "同比变动率": yoy_changes,
         "同比趋势": {
             "营业收入": revenue_yoy_series,
             "利润": profit_yoy_series,
+            "经营现金流": cfo_yoy_series,
+            "货币资金": cash_yoy_series,
+            "有息负债": debt_yoy_series,
         },
         "自由现金流": free_cash_flow,
         "自由现金流缺失原因": fcf_reason,
@@ -529,6 +665,7 @@ def compute_financial_indicators(
         "基础指标": base_metrics,
         "派生指标": derived_metrics,
         "异常标记": flags,
+        "风险矩阵": risk_matrix,
         "口径信息": {
             "profit_mode": profit_mode,
             "profit_source_key": profit_source_key,

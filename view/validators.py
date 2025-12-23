@@ -5,7 +5,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 
-REQUIRED_KEYS = {"基础指标", "派生指标", "异常标记"}
+REQUIRED_KEYS = {"基础指标", "派生指标", "异常标记", "风险矩阵"}
 REQUIRED_DERIVED = {"同比变动率", "自由现金流", "DSRI"}
 REQUIRED_FLAGS = {"同比异常", "派生异常"}
 
@@ -31,12 +31,14 @@ def validate_logic_payload(payload: Mapping[str, Any]) -> None:
     base = payload.get("基础指标")
     derived = payload.get("派生指标")
     flags = payload.get("异常标记")
+    risk_matrix = payload.get("风险矩阵")
 
     _ensure_not_empty(base, "基础指标")
     _ensure_not_empty(derived, "派生指标")
     _ensure_not_empty(flags, "异常标记")
+    _ensure_not_empty(risk_matrix, "风险矩阵")
 
-    if not isinstance(derived, Mapping) or not isinstance(flags, Mapping):
+    if not isinstance(derived, Mapping) or not isinstance(flags, Mapping) or not isinstance(risk_matrix, Mapping):
         raise ValueError("指标或标记格式不符合约定。")
 
     _ensure_keys(derived, REQUIRED_DERIVED, "派生指标")
