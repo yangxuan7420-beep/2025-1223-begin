@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -9,6 +9,7 @@ import pandas as pd
 BASE_METRIC_KEYS: tuple[str, ...] = (
     "营业收入",
     "归母净利润",
+    "净利润",
     "经营活动产生的现金流量净额",
     "货币资金",
     "有息负债",
@@ -18,37 +19,54 @@ DERIVED_REQUIRED_KEYS: tuple[str, ...] = ("资本性支出", "应收账款")
 
 METRIC_ALIASES: Dict[str, tuple[str, ...]] = {
     "营业收入": ("营业收入", "营业总收入", "主营业务收入"),
-    "资本性支出": ("资本性支出", "购建固定资产、无形资产和其他长期资产支付的现金"),
+    "归母净利润": ("归母净利润", "归属于母公司股东的净利润"),
+    "净利润": ("净利润",),
+    "资本性支出": (
+        "资本性支出",
+        "购建固定资产、无形资产和其他长期资产支付的现金",
+        "购建固定资产无形资产和其他长期资产所支付的现金",
+    ),
     "应收账款": ("应收账款", "应收账款净额", "应收账款及票据"),
 }
+
+PARENT_PROFIT_ALIASES: tuple[str, ...] = (
+    "归属于母公司股东的净利润",
+    "归母净利润",
+)
+
+NET_PROFIT_ALIASES: tuple[str, ...] = ("净利润",)
 
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float, np.number)) and not isinstance(value, bool)
 
 
-def _order_index_by_time(index: pd.Index) -> pd.Index:
+def _order_index_by_time(index: pd.Index, *, ascending: bool = False) -> pd.Index:
     if index.empty:
         return index
 
     datetime_index = pd.to_datetime(index, errors="coerce")
     if not pd.isna(datetime_index).all():
-        order = np.argsort(datetime_index)[::-1]
+        order = np.argsort(datetime_index)
+        if not ascending:
+            order = order[::-1]
         return index.take(order)
 
     numeric_index = pd.to_numeric(index, errors="coerce")
     if not pd.isna(numeric_index).all():
-        order = np.argsort(numeric_index)[::-1]
+        order = np.argsort(numeric_index)
+        if not ascending:
+            order = order[::-1]
         return index.take(order)
 
     return index
 
 
-def _order_series_by_time(series: pd.Series) -> pd.Series:
+def _order_series_by_time(series: pd.Series, *, ascending: bool = False) -> pd.Series:
     if series.empty:
         return series
 
-    ordered_index = _order_index_by_time(series.index)
+    ordered_index = _order_index_by_time(series.index, ascending=ascending)
     return series.reindex(ordered_index)
 
 
@@ -135,20 +153,60 @@ def _safe_first(series: pd.Series) -> Any:
     return non_na.iloc[0]
 
 
-def _compute_yoy(series: pd.Series) -> float:
+def _parse_year_like_values(index: pd.Index) -> np.ndarray:
+    datetime_index = pd.to_datetime(index, errors="coerce")
+    if not pd.isna(datetime_index).all():
+        years = pd.Series(datetime_index).dt.year
+        return years.to_numpy()
+
+    numeric_index = pd.to_numeric(index, errors="coerce")
+    if not pd.isna(numeric_index).all():
+        return numeric_index.to_numpy()
+
+    return np.full(len(index), np.nan)
+
+
+def _years_are_consecutive(previous_year: Any, current_year: Any) -> bool:
+    if pd.isna(previous_year) or pd.isna(current_year):
+        return False
+    try:
+        return int(current_year) - int(previous_year) == 1
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _compute_yoy_series(series: pd.Series) -> pd.Series:
     if series.size < 2:
+        return pd.Series(dtype=float)
+
+    ordered = _order_series_by_time(series, ascending=True)
+    years = _parse_year_like_values(ordered.index)
+
+    yoy_values: list[float] = []
+    yoy_index: list[Any] = []
+
+    for idx in range(1, len(ordered)):
+        current_value = ordered.iloc[idx]
+        previous_value = ordered.iloc[idx - 1]
+        current_year = years[idx]
+        previous_year = years[idx - 1]
+
+        yoy = np.nan
+        if _years_are_consecutive(previous_year, current_year):
+            if not pd.isna(previous_value) and previous_value != 0 and not pd.isna(current_value):
+                yoy = (current_value - previous_value) / abs(previous_value)
+
+        yoy_values.append(yoy)
+        yoy_index.append(ordered.index[idx])
+
+    return pd.Series(yoy_values, index=yoy_index)
+
+
+def _compute_yoy(series: pd.Series) -> float:
+    yoy_series = _compute_yoy_series(series)
+    if yoy_series.empty:
         return np.nan
-    ordered = _order_series_by_time(series)
-    non_na = ordered.dropna()
-    if non_na.size < 2:
-        return np.nan
-    current = non_na.iloc[0]
-    previous = non_na.iloc[1]
-    if pd.isna(previous) or previous == 0:
-        return np.nan
-    if pd.isna(current):
-        return np.nan
-    return (current - previous) / abs(previous)
+    return _safe_first(_order_series_by_time(yoy_series))
 
 
 def _negative_or_invalid(value: Any) -> bool:
@@ -175,12 +233,20 @@ def _derived_flag(value: Any, denominator_zero: bool = False) -> bool:
 
 def _compute_free_cash_flow(
     cfo_series: pd.Series, capex_series: pd.Series
-) -> tuple[float, bool]:
-    cfo = _safe_first(cfo_series)
-    capex = _safe_first(capex_series)
-    if pd.isna(cfo) or pd.isna(capex):
-        return np.nan, True
-    return cfo - capex, _negative_or_invalid(cfo - capex)
+) -> tuple[float, bool, pd.Series]:
+    if capex_series.isna().all():
+        return np.nan, True, pd.Series(dtype=float)
+
+    paired = pd.DataFrame({"cfo": cfo_series, "capex": capex_series})
+    ordered_index = _order_index_by_time(paired.index, ascending=True)
+    paired = paired.reindex(ordered_index)
+
+    fcf_series = paired["cfo"] - paired["capex"]
+    valid_mask = paired[["cfo", "capex"]].notna().all(axis=1)
+    fcf_series.loc[~valid_mask] = np.nan
+
+    latest_fcf = _safe_first(_order_series_by_time(fcf_series))
+    return latest_fcf, _negative_or_invalid(latest_fcf), fcf_series
 
 
 def _compute_dsri(
@@ -222,13 +288,49 @@ def compute_financial_indicators(parsed_data: Any) -> Dict[str, Any]:
         key: _extract_series_with_aliases(parsed_data, key) for key in DERIVED_REQUIRED_KEYS
     }
 
+    parent_profit_series_candidates = [
+        _extract_series(parsed_data, alias) for alias in PARENT_PROFIT_ALIASES
+    ]
+    net_profit_series_candidates = [
+        _extract_series(parsed_data, alias) for alias in NET_PROFIT_ALIASES
+    ]
+
+    def _select_profit(
+        candidates: Sequence[pd.Series], aliases: Sequence[str]
+    ) -> tuple[pd.Series, str]:
+        fallback_series = candidates[0] if candidates else pd.Series([np.nan])
+        for series, alias in zip(candidates, aliases):
+            if not series.isna().all():
+                return series, alias
+        return fallback_series, ""
+
+    parent_profit_series, parent_profit_key = _select_profit(
+        parent_profit_series_candidates, PARENT_PROFIT_ALIASES
+    )
+    net_profit_series, net_profit_key = _select_profit(
+        net_profit_series_candidates, NET_PROFIT_ALIASES
+    )
+
+    if not parent_profit_series.isna().all():
+        profit_series = parent_profit_series
+        profit_mode = "归母净利润"
+        profit_source_key = parent_profit_key or PARENT_PROFIT_ALIASES[0]
+    elif not net_profit_series.isna().all():
+        profit_series = net_profit_series
+        profit_mode = "净利润"
+        profit_source_key = net_profit_key or NET_PROFIT_ALIASES[0]
+    else:
+        profit_series = pd.Series([np.nan])
+        profit_mode = "缺失"
+        profit_source_key = ""
+
     base_metrics: Dict[str, Any] = {k: _safe_first(v) for k, v in base_series.items()}
 
     yoy_changes: Dict[str, Any] = {
         key: _compute_yoy(series) for key, series in base_series.items()
     }
 
-    free_cash_flow, fcf_flag = _compute_free_cash_flow(
+    free_cash_flow, fcf_flag, free_cash_flow_series = _compute_free_cash_flow(
         base_series["经营活动产生的现金流量净额"], supplemental_series["资本性支出"]
     )
 
@@ -244,9 +346,17 @@ def compute_financial_indicators(parsed_data: Any) -> Dict[str, Any]:
     }
     derived_flags["同比变动率"] = any(yoy_flags.values())
 
+    revenue_yoy_series = _compute_yoy_series(base_series["营业收入"])
+    profit_yoy_series = _compute_yoy_series(profit_series)
+
     derived_metrics: Dict[str, Any] = {
         "同比变动率": yoy_changes,
+        "同比趋势": {
+            "营业收入": revenue_yoy_series,
+            "利润": profit_yoy_series,
+        },
         "自由现金流": free_cash_flow,
+        "自由现金流水平": free_cash_flow_series,
         "DSRI": dsri_value,
     }
 
@@ -259,4 +369,8 @@ def compute_financial_indicators(parsed_data: Any) -> Dict[str, Any]:
         "基础指标": base_metrics,
         "派生指标": derived_metrics,
         "异常标记": flags,
+        "口径信息": {
+            "profit_mode": profit_mode,
+            "profit_source_key": profit_source_key,
+        },
     }
