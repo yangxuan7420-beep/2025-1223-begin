@@ -8,6 +8,8 @@ from typing import Any, Iterable, Mapping, Sequence
 import pandas as pd
 import streamlit as st
 
+from logic.factor_lab import Factor, Relation, Scenario, assumption_positive, sensitivity_analysis
+
 
 Signal = dict[str, Any]
 
@@ -381,6 +383,182 @@ def _render_evidence_block(logic_output: Mapping[str, Any], evidence: Sequence[M
             st.caption(caption or "未指定的证据类型")
 
 
+_FACTOR_LAB_CONFIG: dict[str, dict[str, Any]] = {
+    "profit_quality": {
+        "columns": ("经营现金流", "利润"),
+        "factor": Factor(
+            name="CashProfitYoYRatio",
+            description="经营现金流同比对利润同比的支撑程度",
+            relation=Relation(operator="Ratio", operands=("经营现金流", "利润")),
+            assumptions=(
+                assumption_positive("利润", assumption_id="P1", description="利润同比为正"),
+                assumption_positive("经营现金流", assumption_id="P2", description="经营现金流同比为正"),
+            ),
+        ),
+        "scenarios": (
+            Scenario(id="S0", title="无约束", enabled_assumptions=()),
+            Scenario(id="S1", title="利润同比为正", enabled_assumptions=("P1",)),
+            Scenario(
+                id="S2",
+                title="利润同比为正 + 经营现金流同比为正",
+                enabled_assumptions=("P1", "P2"),
+            ),
+        ),
+    },
+    "financial_structure": {
+        "columns": ("有息负债", "货币资金"),
+        "factor": Factor(
+            name="DebtCashYoYRatio",
+            description="有息负债同比相对于货币资金同比的变化",
+            relation=Relation(operator="Ratio", operands=("有息负债", "货币资金")),
+            assumptions=(
+                assumption_positive("有息负债", assumption_id="F1", description="有息负债同比为正"),
+                assumption_positive("货币资金", assumption_id="F2", description="货币资金同比为正"),
+            ),
+        ),
+        "scenarios": (
+            Scenario(id="S0", title="无约束", enabled_assumptions=()),
+            Scenario(id="S1", title="有息负债同比为正", enabled_assumptions=("F1",)),
+            Scenario(
+                id="S2",
+                title="有息负债同比为正 + 货币资金同比为正",
+                enabled_assumptions=("F1", "F2"),
+            ),
+        ),
+    },
+    "operating_stability": {
+        "columns": ("营业收入", "利润"),
+        "factor": Factor(
+            name="ProfitRevenueYoYRatio",
+            description="利润同比相对于收入同比的变化",
+            relation=Relation(operator="Ratio", operands=("利润", "营业收入")),
+            assumptions=(
+                assumption_positive("营业收入", assumption_id="O1", description="营业收入同比为正"),
+                assumption_positive("利润", assumption_id="O2", description="利润同比为正"),
+            ),
+        ),
+        "scenarios": (
+            Scenario(id="S0", title="无约束", enabled_assumptions=()),
+            Scenario(id="S1", title="营业收入同比为正", enabled_assumptions=("O1",)),
+            Scenario(
+                id="S2",
+                title="营业收入同比为正 + 利润同比为正",
+                enabled_assumptions=("O1", "O2"),
+            ),
+        ),
+    },
+}
+
+
+def _build_factor_lab_frame(logic_output: Mapping[str, Any], columns: Sequence[str]) -> pd.DataFrame:
+    derived = logic_output.get("派生指标", {})
+    yoy_trends = derived.get("同比趋势", {})
+    series_frames = []
+    for column in columns:
+        series = yoy_trends.get(column)
+        if not isinstance(series, pd.Series):
+            series = pd.Series(dtype=float)
+        frame = series.rename(column).to_frame()
+        series_frames.append(frame)
+
+    combined = pd.concat(series_frames, axis=1)
+    combined.index.name = "year"
+    combined = combined.reset_index()
+    combined["year"] = pd.to_numeric(combined["year"], errors="coerce")
+    combined["entity"] = "当前标的"
+    return combined
+
+
+def _resolve_factor_lab_years(data: pd.DataFrame) -> list[int]:
+    if "year" not in data.columns:
+        return []
+    years = pd.to_numeric(data["year"], errors="coerce").dropna().astype(int)
+    return sorted(years.unique().tolist())
+
+
+def _render_cross_section_summary(summary: Mapping[str, Any] | None) -> None:
+    st.write("横截面分布 / 排序摘要")
+    if not summary:
+        st.info("暂无可用的横截面摘要。")
+        return
+    highlight = {
+        "year": summary.get("year"),
+        "coverage": summary.get("coverage"),
+        "quantiles": summary.get("quantiles"),
+        "groups": summary.get("groups"),
+    }
+    st.json(highlight)
+    ranking = pd.DataFrame(summary.get("ranking", []))
+    if not ranking.empty:
+        st.table(ranking)
+    else:
+        st.caption("无可用排序数据。")
+
+
+def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) -> None:
+    config = _FACTOR_LAB_CONFIG.get(signal_id)
+    if not config:
+        st.info("当前信号暂无量化验证配置。")
+        return
+
+    st.caption("量化验证仅用于研究探索，不影响原有研究结论与风险提示。")
+
+    if "factor_lab_results" not in st.session_state:
+        st.session_state["factor_lab_results"] = {}
+
+    run_key = f"factor_lab_run_{signal_id}"
+    if st.button("运行量化验证", key=run_key):
+        data = _build_factor_lab_frame(logic_output, config["columns"])
+        years = _resolve_factor_lab_years(data)
+        if data.empty or not years:
+            st.session_state["factor_lab_results"][signal_id] = {
+                "error": "缺少可用的时间序列数据，无法执行量化验证。",
+            }
+        else:
+            results = sensitivity_analysis(
+                data,
+                base_factor=config["factor"],
+                scenarios=config["scenarios"],
+                group_key="entity",
+                time_key="year",
+                years=years,
+            )
+            st.session_state["factor_lab_results"][signal_id] = {
+                "results": results,
+                "years": years,
+            }
+
+    stored = st.session_state.get("factor_lab_results", {}).get(signal_id)
+    if not stored:
+        return
+
+    if stored.get("error"):
+        st.info(stored["error"])
+        return
+
+    results = stored.get("results", {})
+    years = stored.get("years", [])
+    scenarios = config["scenarios"]
+    base_id = scenarios[0].id if scenarios else None
+    latest_year = max(years) if years else None
+    summary = None
+    if base_id and latest_year is not None:
+        summary = (
+            results.get("scenarios", {})
+            .get(base_id, {})
+            .get("summaries", {})
+            .get(latest_year)
+        )
+    _render_cross_section_summary(summary)
+
+    st.write("条件敏感性（不同 scenario 的对比结果）")
+    comparisons = results.get("comparisons", {})
+    if comparisons:
+        st.json(comparisons)
+    else:
+        st.info("暂无可用的情景对比结果。")
+
+
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
     st.header("研究提示（Research Signals）")
 
@@ -438,3 +616,6 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
                     st.info("暂无该行业的增强解释，已展示通用解释。")
                 else:
                     st.caption("当前未选择行业增强，已展示通用提示。")
+
+            with st.expander("研究判断的量化条件验证（可选）", expanded=False):
+                _render_factor_lab_section(signal["id"], logic_output)
