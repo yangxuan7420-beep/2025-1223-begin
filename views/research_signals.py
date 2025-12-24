@@ -482,10 +482,10 @@ def _infer_cross_section_conclusion(summary: Mapping[str, Any]) -> str:
     total_count = int(coverage.get("total", 0) or 0)
 
     if normal_count < 5:
-        return "当前样本规模较小，因子区分度有限。"
+        return "当前样本规模较小，该判断在横截面上的区分度有限。"
     if total_count >= 10:
-        return "该因子在横截面上存在明显分层。"
-    return "该因子在横截面上存在一定分层，但仍需结合更多样本验证。"
+        return "该判断在横截面上存在一定分化，具备区分意义。"
+    return "该判断在横截面上存在一定分化，但仍需结合更多样本验证。"
 
 
 def _infer_relative_position(summary: Mapping[str, Any], entity_name: str = "当前标的") -> str:
@@ -512,9 +512,9 @@ def _infer_relative_position(summary: Mapping[str, Any], entity_name: str = "当
         position = "中位"
 
     if percentile <= 0.1:
-        hint = "，接近样本上分位"
+        hint = "，接近样本高位"
     elif percentile >= 0.9:
-        hint = "，接近样本下分位"
+        hint = "，接近样本低位"
     else:
         hint = ""
 
@@ -550,19 +550,20 @@ def _infer_sensitivity_conclusion(comparisons: Mapping[str, Any], latest_year: i
     return "不同条件下结论大体一致，但仍存在一定波动。"
 
 
-def _render_cross_section_summary(summary: Mapping[str, Any] | None) -> None:
-    st.markdown("### 横截面结论")
-    if not summary:
-        st.info("暂无可用的横截面摘要。")
-        return
+def _resolve_quant_conclusions(
+    summary: Mapping[str, Any] | None,
+    comparisons: Mapping[str, Any],
+    latest_year: int | None,
+) -> tuple[str, str, str]:
+    if summary:
+        cross_section = _infer_cross_section_conclusion(summary)
+        relative_position = _infer_relative_position(summary)
+    else:
+        cross_section = "暂无可用的横截面摘要，区分度判断有限。"
+        relative_position = "暂无可用的排序信息，无法判断当前公司的相对位置。"
 
-    coverage = summary.get("coverage", {}) if isinstance(summary, Mapping) else {}
-    normal_count = int(coverage.get("normal", 0) or 0)
-    st.markdown(_infer_cross_section_conclusion(summary))
-    st.caption(f"样本数量：{normal_count}")
-
-    st.markdown("### 当前公司的相对位置")
-    st.markdown(_infer_relative_position(summary))
+    sensitivity = _infer_sensitivity_conclusion(comparisons, latest_year)
+    return cross_section, relative_position, sensitivity
 
 
 def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) -> None:
@@ -619,11 +620,13 @@ def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) 
             .get("summaries", {})
             .get(latest_year)
         )
-    _render_cross_section_summary(summary)
-
-    st.markdown("### 条件敏感性结论")
     comparisons = results.get("comparisons", {})
-    st.markdown(_infer_sensitivity_conclusion(comparisons, latest_year))
+    cross_section, relative_position, sensitivity = _resolve_quant_conclusions(
+        summary, comparisons, latest_year
+    )
+    st.markdown(f"- 横截面结论：{cross_section}")
+    st.markdown(f"- 当前公司相对位置：{relative_position}")
+    st.markdown(f"- 条件敏感性结论：{sensitivity}")
 
 
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
@@ -684,5 +687,5 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
                 else:
                     st.caption("当前未选择行业增强，已展示通用提示。")
 
-            with st.expander("研究判断的量化条件验证（可选）", expanded=False):
+            with st.expander("研究判断的适用边界（量化辅助）", expanded=False):
                 _render_factor_lab_section(signal["id"], logic_output)
