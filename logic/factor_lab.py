@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""量化因子实验模块：构建关系、假设并输出量化验证结果。"""
+
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
@@ -306,20 +308,5 @@ def assumption_positive(column: str, *, assumption_id: str, description: str) ->
 
     def evaluator(data: pd.DataFrame, group_key: str, time_key: str) -> pd.Series:
         return data[column] > 0
-
-    return Assumption(id=assumption_id, description=description, formula=formula, evaluator=evaluator)
-
-
-def assumption_yoy_positive(
-    column: str, *, assumption_id: str, description: str
-) -> Assumption:
-    formula = f"YoY({column}) > 0"
-
-    def evaluator(data: pd.DataFrame, group_key: str, time_key: str) -> pd.Series:
-        values, status = _compute_yoy(data, column, group_key, time_key)
-        mask = values > 0
-        mask = mask.mask(status == STATUS_UNASSESSABLE, np.nan)
-        mask = mask.mask(status == STATUS_ABNORMAL, False)
-        return mask
 
     return Assumption(id=assumption_id, description=description, formula=formula, evaluator=evaluator)
