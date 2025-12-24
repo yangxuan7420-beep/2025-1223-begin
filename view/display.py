@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+"""展示层模块：负责在 Streamlit 页面渲染指标、图表与风险状态。"""
+
 import re
-from pathlib import Path
 from typing import Any, Mapping
 
 import pandas as pd
@@ -153,37 +154,3 @@ def render_risk_status(risk_matrix: Mapping[str, Any]) -> None:
     flag_df = pd.DataFrame(rows).set_index("指标")
     st.caption("✅ 触发异常；⬜ 未触发；— 无法评估/不适用。")
     st.dataframe(flag_df)
-
-
-def render_mapping_info(mapping_info: Mapping[str, Any]) -> None:
-    st.header("口径信息")
-    profit_mode = mapping_info.get("profit_mode")
-    profit_source_key = mapping_info.get("profit_source_key")
-    selected_mapping = mapping_info.get("selected_mapping", {})
-
-    info_cols = st.columns(2)
-    with info_cols[0]:
-        st.metric("利润口径", profit_mode or "缺失")
-    with info_cols[1]:
-        st.metric("利润字段", profit_source_key or "未命中")
-
-    if not selected_mapping:
-        st.info("尚未选择口径映射。")
-        return
-
-    rows: list[dict[str, str]] = []
-    for metric, choice in selected_mapping.items():
-        if not choice:
-            rows.append({"指标": metric, "科目": "未选择", "来源表": ""})
-            continue
-        table_name = choice.get("table_name") or ""
-        rows.append(
-            {
-                "指标": metric,
-                "科目": str(choice.get("raw_name") or "未选择"),
-                "来源表": Path(table_name).name if table_name else "",
-            }
-        )
-
-    if rows:
-        st.dataframe(pd.DataFrame(rows).set_index("指标"))
