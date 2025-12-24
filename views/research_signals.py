@@ -60,6 +60,7 @@ def _collect_signatures(series_list: Iterable[pd.Series | None]) -> set[int]:
 def _build_signal(
     *,
     signal_id: str,
+    quant_type: str,
     title: str,
     level: str,
     summary: str,
@@ -68,6 +69,7 @@ def _build_signal(
 ) -> Signal:
     return {
         "id": signal_id,
+        "quant_type": quant_type,
         "title": title,
         "level": level,
         "summary": summary,
@@ -115,6 +117,7 @@ def _profit_quality_signal(logic_output: Mapping[str, Any]) -> Signal:
 
     return _build_signal(
         signal_id="profit_quality",
+        quant_type="profit_quality",
         title="盈利质量（Profit Quality）",
         level=level,
         summary=summary,
@@ -150,6 +153,7 @@ def _financial_structure_signal(logic_output: Mapping[str, Any]) -> Signal:
 
     return _build_signal(
         signal_id="financial_structure",
+        quant_type="financial_structure",
         title="财务结构（Leverage / Debt）",
         level=level,
         summary=summary,
@@ -198,6 +202,7 @@ def _operating_stability_signal(logic_output: Mapping[str, Any]) -> Signal:
 
     return _build_signal(
         signal_id="operating_stability",
+        quant_type="operating_stability",
         title="经营稳定性（Operating Stability）",
         level=level,
         summary=summary,
@@ -449,6 +454,24 @@ _FACTOR_LAB_CONFIG: dict[str, dict[str, Any]] = {
     },
 }
 
+_QUANT_CONCLUSION_TEMPLATES: dict[str, dict[str, str]] = {
+    "profit_quality": {
+        "cross_section": "从现金与利润一致性的角度看，{base}",
+        "relative_position": "现金兑现质量的相对位置判断：{base}",
+        "sensitivity": "在现金流约束下的敏感性：{base}",
+    },
+    "financial_structure": {
+        "cross_section": "从杠杆与偿债约束的角度看，{base}",
+        "relative_position": "资本结构安全边际的相对位置：{base}",
+        "sensitivity": "在债务约束变化下的敏感性：{base}",
+    },
+    "operating_stability": {
+        "cross_section": "从收入与利润稳定性的角度看，{base}",
+        "relative_position": "经营波动水平的相对位置：{base}",
+        "sensitivity": "在经营节奏变化下的敏感性：{base}",
+    },
+}
+
 
 def _build_factor_lab_frame(logic_output: Mapping[str, Any], columns: Sequence[str]) -> pd.DataFrame:
     derived = logic_output.get("派生指标", {})
@@ -551,6 +574,7 @@ def _infer_sensitivity_conclusion(comparisons: Mapping[str, Any], latest_year: i
 
 
 def _resolve_quant_conclusions(
+    quant_type: str,
     summary: Mapping[str, Any] | None,
     comparisons: Mapping[str, Any],
     latest_year: int | None,
@@ -563,11 +587,21 @@ def _resolve_quant_conclusions(
         relative_position = "暂无可用的排序信息，无法判断当前公司的相对位置。"
 
     sensitivity = _infer_sensitivity_conclusion(comparisons, latest_year)
-    return cross_section, relative_position, sensitivity
+    templates = _QUANT_CONCLUSION_TEMPLATES.get(quant_type)
+    if not templates:
+        return cross_section, relative_position, sensitivity
+
+    return (
+        templates["cross_section"].format(base=cross_section),
+        templates["relative_position"].format(base=relative_position),
+        templates["sensitivity"].format(base=sensitivity),
+    )
 
 
-def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) -> None:
-    config = _FACTOR_LAB_CONFIG.get(signal_id)
+def _render_factor_lab_section(
+    signal_id: str, quant_type: str, logic_output: Mapping[str, Any]
+) -> None:
+    config = _FACTOR_LAB_CONFIG.get(quant_type)
     if not config:
         st.info("当前信号暂无量化验证配置。")
         return
@@ -622,7 +656,7 @@ def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) 
         )
     comparisons = results.get("comparisons", {})
     cross_section, relative_position, sensitivity = _resolve_quant_conclusions(
-        summary, comparisons, latest_year
+        quant_type, summary, comparisons, latest_year
     )
     st.markdown(f"- 横截面结论：{cross_section}")
     st.markdown(f"- 当前公司相对位置：{relative_position}")
@@ -688,4 +722,6 @@ def render_research_signals(logic_output: Mapping[str, Any]) -> None:
                     st.caption("当前未选择行业增强，已展示通用提示。")
 
             with st.expander("研究判断的适用边界（量化辅助）", expanded=False):
-                _render_factor_lab_section(signal["id"], logic_output)
+                _render_factor_lab_section(
+                    signal["id"], signal.get("quant_type", signal["id"]), logic_output
+                )
