@@ -476,23 +476,93 @@ def _resolve_factor_lab_years(data: pd.DataFrame) -> list[int]:
     return sorted(years.unique().tolist())
 
 
+def _infer_cross_section_conclusion(summary: Mapping[str, Any]) -> str:
+    coverage = summary.get("coverage", {}) if isinstance(summary, Mapping) else {}
+    normal_count = int(coverage.get("normal", 0) or 0)
+    total_count = int(coverage.get("total", 0) or 0)
+
+    if normal_count < 5:
+        return "当前样本规模较小，因子区分度有限。"
+    if total_count >= 10:
+        return "该因子在横截面上存在明显分层。"
+    return "该因子在横截面上存在一定分层，但仍需结合更多样本验证。"
+
+
+def _infer_relative_position(summary: Mapping[str, Any], entity_name: str = "当前标的") -> str:
+    ranking = summary.get("ranking", []) if isinstance(summary, Mapping) else []
+    if not ranking:
+        return "暂无当前公司的有效排序位置。"
+
+    rank_frame = pd.DataFrame(ranking)
+    if rank_frame.empty or entity_name not in rank_frame.get("entity", []):
+        return "暂无当前公司的有效排序位置。"
+
+    rank_frame = rank_frame.reset_index(drop=True)
+    position_idx = int(rank_frame.index[rank_frame["entity"] == entity_name][0])
+    total = len(rank_frame)
+    if total <= 1:
+        return "当前公司位于样本中位附近。"
+
+    percentile = position_idx / (total - 1)
+    if percentile <= 0.33:
+        position = "高位"
+    elif percentile >= 0.66:
+        position = "低位"
+    else:
+        position = "中位"
+
+    if percentile <= 0.1:
+        hint = "，接近样本上分位"
+    elif percentile >= 0.9:
+        hint = "，接近样本下分位"
+    else:
+        hint = ""
+
+    return f"当前公司位于样本{position}{hint}。"
+
+
+def _infer_sensitivity_conclusion(comparisons: Mapping[str, Any], latest_year: int | None) -> str:
+    if not comparisons or latest_year is None:
+        return "暂无可用的情景对比结果，无法判断条件敏感性。"
+
+    stable = 0
+    moderate = 0
+    volatile = 0
+
+    for comparison in comparisons.values():
+        ranking_change = comparison.get("ranking_change", {})
+        year_result = ranking_change.get(latest_year, {}) if isinstance(ranking_change, Mapping) else {}
+        spearman = year_result.get("spearman")
+        if spearman is None or pd.isna(spearman):
+            moderate += 1
+            continue
+        if spearman >= 0.7:
+            stable += 1
+        elif spearman >= 0.4:
+            moderate += 1
+        else:
+            volatile += 1
+
+    if volatile > 0:
+        return "不同条件下结果波动较大，需谨慎使用该判断。"
+    if stable > 0 and moderate == 0:
+        return "不同条件下排序整体稳定，结论一致性较高。"
+    return "不同条件下结论大体一致，但仍存在一定波动。"
+
+
 def _render_cross_section_summary(summary: Mapping[str, Any] | None) -> None:
-    st.write("横截面分布 / 排序摘要")
+    st.markdown("### 横截面结论")
     if not summary:
         st.info("暂无可用的横截面摘要。")
         return
-    highlight = {
-        "year": summary.get("year"),
-        "coverage": summary.get("coverage"),
-        "quantiles": summary.get("quantiles"),
-        "groups": summary.get("groups"),
-    }
-    st.json(highlight)
-    ranking = pd.DataFrame(summary.get("ranking", []))
-    if not ranking.empty:
-        st.table(ranking)
-    else:
-        st.caption("无可用排序数据。")
+
+    coverage = summary.get("coverage", {}) if isinstance(summary, Mapping) else {}
+    normal_count = int(coverage.get("normal", 0) or 0)
+    st.markdown(_infer_cross_section_conclusion(summary))
+    st.caption(f"样本数量：{normal_count}")
+
+    st.markdown("### 当前公司的相对位置")
+    st.markdown(_infer_relative_position(summary))
 
 
 def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) -> None:
@@ -551,12 +621,9 @@ def _render_factor_lab_section(signal_id: str, logic_output: Mapping[str, Any]) 
         )
     _render_cross_section_summary(summary)
 
-    st.write("条件敏感性（不同 scenario 的对比结果）")
+    st.markdown("### 条件敏感性结论")
     comparisons = results.get("comparisons", {})
-    if comparisons:
-        st.json(comparisons)
-    else:
-        st.info("暂无可用的情景对比结果。")
+    st.markdown(_infer_sensitivity_conclusion(comparisons, latest_year))
 
 
 def render_research_signals(logic_output: Mapping[str, Any]) -> None:
